@@ -30,8 +30,8 @@ Technologies used in the project:
 - **Ruby**: 3.3.0
 - **Rails**: 7.2.1
 
-To get started with our project, you can create a new Rails project using the following command:
+For a quick start on any project, you can use this repository: [https://github.com/hamzagedikkaya/rails_template](https://github.com/hamzagedikkaya/rails_template). This is a **quick_start_template** that I have written. Since I will be starting the project with this template, I will first explain the structures within the template and how they work. Let's start the project with the following command:
 
 ```bash
-rails new e_commerce -d postgresql
+rails new e_commerce -j esbuild -c bootstrap -d postgresql
 ```
