@@ -74,6 +74,8 @@ git add .
 git commit -m "chore: initialize LeaveMaster project and setup database"
 ```
 
+You can view the relevant commit [here](https://github.com/hamzagedikkaya/leave_master/commit/ad686a55ca41027e38b2032d1aa2206ae4121ca0).
+
 ---
 
 ## Tailwind CSS Setup
@@ -114,3 +116,5 @@ Finally, commit your changes with:
 git add .
 git commit -m "feat: generate main controller and update routes for home action"
 ```
+
+You can view the relevant commit [here](https://github.com/hamzagedikkaya/leave_master/commit/41901c72b8d65712bcf5be94884198e77f916ff3).

@@ -1,9 +1,9 @@
 # Hello! 👋
 
-I'm a developer in the process of improving my skills. 💻 Since June 2023, I've been working at a corporate company. In my free time, I share details of the projects I work on on my [GitHub.io](https://hamzagedikkaya.github.io) page. 🛠️
+I'm a passionate software developer on a journey of continuous growth and learning. 💻 Since June 2023, I’ve been gaining valuable experience at a corporate company, where I tackle innovative projects and sharpen my skills. In my free time, I love sharing my work and insights on my [GitHub.io](https://hamzagedikkaya.github.io) page, showcasing the projects I’ve been crafting. 🛠️
 
-You can check out what I've been working on by visiting [here](https://hamzagedikkaya.github.io). 📂
+I invite you to explore my portfolio and see what I've been working on by visiting [this page](https://hamzagedikkaya.github.io). 📂
 
-If you'd like to see the repository for the project I'm currently working on, you can find it [here](https://github.com/hamzagedikkaya/E-Commerce-Project). 🚀
+Curious about the latest project I’m developing? You can dive into the repository [here](https://github.com/hamzagedikkaya/leave_master). 🚀
 
-Thanks for your interest! 😊
+Thank you for taking the time to visit, and I hope you find my work inspiring! 😊

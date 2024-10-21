@@ -88,3 +88,7 @@ end
   - skip_format?: This method allows the app to skip the format check for certain formats, ensuring Turbo Stream responses are handled correctly.
   - navigational_formats: By including :turbo_stream, you ensure that Turbo can handle navigational responses.
   - warden configuration: This part sets the failure app to your custom class, allowing you to manage authentication failures more effectively.
+
+When committing changes, a message like the following would be appropriate: `chore: setup Devise with Hotwire integration`. 
+
+You can access the relevant commit [here](https://github.com/hamzagedikkaya/leave_master/commit/58b39158cfe6bbfecb032ed609cc714ab6c02f97).
