@@ -18,6 +18,8 @@ top: 1
 
 This project focuses on developing a **Leave Management System** where users can efficiently track and manage their annual leave. The system will support essential features such as requesting, approving, and monitoring employee leave. Managers will have access to comprehensive leave reports, ensuring smooth operations without disruptions.
 
+---
+
 ## Project Overview
 
 In the **Leave Master** application, employees can submit leave requests for annual vacations, sick leaves, and other time off categories. The system helps managers monitor and manage these requests, ensuring that no department is left understaffed while allowing employees to take their entitled leave.
@@ -28,6 +30,8 @@ Key features of the Leave Master project include:
 - **Approval Workflow**: Managers can approve or reject leave requests with real-time notifications to employees.
 - **Leave Balances**: Employees can track their remaining leave days for the year.
 - **Admin Reports**: HR and management can generate reports on leave patterns and ensure compliance with leave policies.
+
+---
 
 ## Technologies Used
 
@@ -91,6 +95,7 @@ git commit -m "chore: add Tailwind CSS setup"
 
 These commands will install Tailwind CSS, set up the configuration, and precompile your assets. If your local CSS changes under the `assets` directory are not reflected, you might need to re-run the precompile command to apply those changes.
 
+---
 
 ## Home Page
 
@@ -118,3 +123,5 @@ git commit -m "feat: generate main controller and update routes for home action"
 ```
 
 You can view the relevant commit [here](https://github.com/hamzagedikkaya/leave_master/commit/41901c72b8d65712bcf5be94884198e77f916ff3).
+
+---
