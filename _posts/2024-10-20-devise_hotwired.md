@@ -1,6 +1,6 @@
 ---
 layout: post
-title: "Building a Modern Rails Authentication System: Devise, Hotwire, Simple Form & Active Storage"
+title: "Modern Rails Authentication with Devise & Hotwire"
 author: Hamza Gedikkaya
 categories: 
   - Rails Projects
