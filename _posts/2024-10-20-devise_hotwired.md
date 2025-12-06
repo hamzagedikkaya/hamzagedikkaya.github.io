@@ -1,6 +1,6 @@
 ---
 layout: post
-title: Devise Hotwired
+title: "Building a Modern Rails Authentication System: Devise, Hotwire, Simple Form & Active Storage"
 author: Hamza Gedikkaya
 categories: 
   - Rails Projects
@@ -9,49 +9,106 @@ banner:
   image: /assets/images/posts/second_post.jpg
   height: "50vh"
 tags: 
-  - Leave Master Project
-  - Gem
+  - Ruby on Rails
+  - Devise
+  - Hotwire
+  - Authentication
 ---
 
-### Setting Up User Authentication with Devise
+Building robust user authentication is a fundamental requirement for most web applications. In this guide, we'll walk through setting up a complete authentication system in Rails using Devise, integrating it seamlessly with Hotwire for a modern SPA-like experience, enhancing our forms with Simple Form, and implementing user profile images with Active Storage.
 
-Devise is a popular gem for Ruby on Rails applications that simplifies the management of user authentication securely and efficiently. Below are the steps to install Devise and add custom fields to your user model.
+By the end of this guide, you'll have a fully functional authentication system that handles user registration, login, profile management, and image uploads—all working smoothly with Turbo.
+
+---
+
+## Table of Contents
+
+1. [Devise Setup](#1-devise-setup)
+2. [Hotwire Integration](#2-hotwire-integration)
+3. [Simple Form Configuration](#3-simple-form-configuration)
+4. [Active Storage & Image Processing](#4-active-storage--image-processing)
+
+---
+
+## 1. Devise Setup
+
+Devise is the de facto standard for authentication in Rails applications. It provides a complete MVC solution with modules for password recovery, session management, email confirmation, and more.
+
+### Installation
 
 ```bash
-# Add Devise gem to the Gemfile
 bundle add devise
-
-# Install Devise and generate necessary configuration files
 rails generate devise:install
-
-# Generate Devise views for user authentication
-rails g devise:views
-
-# Create User model with Devise
+rails generate devise:views
 rails generate devise User
 ```
 
-If you want to add custom fields to your user model, open the migration file located in the `db/migrate` directory and add the following code:
+After running the generator, Devise will create a migration file in `db/migrate/`. Before running the migration, let's add some custom fields to our User model.
+
+### Adding Custom Fields
+
+Open the generated migration file and add the following fields within the `create_table` block:
 
 ```ruby
-## Custom Fields
-t.string :name_surname, null: false, default: ""
-t.string :gsm
-t.date   :date_of_birth
+# db/migrate/XXXXXX_devise_create_users.rb
+
+def change
+  create_table :users do |t|
+    ## Database authenticatable
+    t.string :email,              null: false, default: ""
+    t.string :encrypted_password, null: false, default: ""
+
+    # ... other Devise fields ...
+
+    ## Custom Fields
+    t.string :name_surname, null: false, default: ""
+    t.string :gsm
+    t.date   :date_of_birth
+
+    t.timestamps null: false
+  end
+
+  add_index :users, :email, unique: true
+  add_index :users, :reset_password_token, unique: true
+end
 ```
 
-If we add custom fields, we will need to follow a different approach to store this data within the user model.
+### Configuring Strong Parameters
 
-**Define Routes**: Add the following line in `config/routes.rb`:
+When adding custom fields, we need to permit them in Devise's strong parameters. First, update your routes to use a custom registrations controller:
+
 ```ruby
-devise_for :users, controllers: { registrations: "users/registrations" }
+# config/routes.rb
+
+Rails.application.routes.draw do
+  devise_for :users, controllers: { registrations: "users/registrations" }
+  
+  # ... other routes ...
+end
 ```
-**Create a Registrations Controller**: We need to create a `registrations_controller.rb` file and update the `sign_up_params` and `account_update_params` methods.
 
-You can find an example of this controller at the following link:  
-[Registrations Controller - Leave Master](https://github.com/hamzagedikkaya/leave_master/blob/main/app/controllers/users/registrations_controller.rb)
+Then create the custom controller:
 
-To apply your changes, run the database migration:
+```ruby
+# app/controllers/users/registrations_controller.rb
+
+class Users::RegistrationsController < Devise::RegistrationsController
+  before_action :configure_sign_up_params, only: [:create]
+  before_action :configure_account_update_params, only: [:update]
+
+  protected
+
+  def configure_sign_up_params
+    devise_parameter_sanitizer.permit(:sign_up, keys: [:name_surname, :gsm, :date_of_birth])
+  end
+
+  def configure_account_update_params
+    devise_parameter_sanitizer.permit(:account_update, keys: [:name_surname, :gsm, :date_of_birth])
+  end
+end
+```
+
+Now run the migration:
 
 ```bash
 rails db:migrate
@@ -59,17 +116,21 @@ rails db:migrate
 
 ---
 
-## Hotwire
+## 2. Hotwire Integration
 
-Hotwire is a framework for building modern web applications without relying heavily on JavaScript. It leverages server-side rendering and provides a seamless user experience by using Turbo and Stimulus. Below is an example of how to customize Devise to work with Turbo.
+Hotwire (HTML Over The Wire) is Rails' answer to building reactive applications without writing custom JavaScript. However, Devise was built before Hotwire existed, so we need to make a few adjustments to ensure they work together smoothly.
 
----
+### The Problem
 
-## Custom Failure App for Turbo
+By default, when Devise encounters an authentication error (invalid credentials, unauthorized access, etc.), it responds with HTTP status codes that Turbo doesn't handle gracefully. This can result in broken redirects or missing flash messages.
 
-In order to handle authentication failures with Turbo Stream, you can create a custom failure app that inherits from `Devise::FailureApp`. Here’s how you can set it up:
+### Creating a Custom Failure App
+
+To handle authentication failures properly with Turbo, create a custom failure app:
 
 ```ruby
+# lib/turbo_failure_app.rb
+
 class TurboFailureApp < Devise::FailureApp
   def respond
     if request_format == :turbo_stream
@@ -80,127 +141,229 @@ class TurboFailureApp < Devise::FailureApp
   end
 
   def skip_format?
-    %w[html turbo_stream */*].include? request_format.to_s
+    %w[html turbo_stream */*].include?(request_format.to_s)
   end
 end
 ```
-Next, you need to configure Devise to use the custom `TurboFailureApp`. Open your `devise.rb` initializer and make the following changes:
+
+### Configuring Devise for Turbo
+
+Update your Devise initializer to use the custom failure app:
 
 ```ruby
-# Set navigational formats to include Turbo Stream
-config.navigational_formats = [ "*/*", :html, :turbo_stream ]
+# config/initializers/devise.rb
 
-config.warden do |manager|
-  manager.failure_app = TurboFailureApp
-  # manager.intercept_401 = false
-  # manager.default_strategies(scope: :user).unshift :some_external_strategy
+# Ensure the custom failure app is loaded
+require "turbo_failure_app"
+
+Devise.setup do |config|
+  # ... other configurations ...
+
+  # Add turbo_stream to navigational formats
+  config.navigational_formats = ["*/*", :html, :turbo_stream]
+
+  # Configure Warden to use our custom failure app
+  config.warden do |manager|
+    manager.failure_app = TurboFailureApp
+  end
 end
 ```
 
-  - TurboFailureApp: This custom class overrides the respond method to check if the request format is turbo_stream. If it is, it redirects the user; otherwise, it falls back to the default behavior.
-  - skip_format?: This method allows the app to skip the format check for certain formats, ensuring Turbo Stream responses are handled correctly.
-  - navigational_formats: By including :turbo_stream, you ensure that Turbo can handle navigational responses.
-  - warden configuration: This part sets the failure app to your custom class, allowing you to manage authentication failures more effectively.
+### How It Works
 
-When committing changes, a message like the following would be appropriate: `chore: setup Devise with Hotwire integration`. 
+| Component | Purpose |
+|-----------|---------|
+| `TurboFailureApp` | Intercepts authentication failures and ensures proper redirect behavior for Turbo Stream requests |
+| `skip_format?` | Allows the failure app to handle HTML, Turbo Stream, and wildcard formats |
+| `navigational_formats` | Tells Devise which response formats should trigger redirects instead of 401 responses |
 
-You can access the relevant commit [here](https://github.com/hamzagedikkaya/leave_master/commit/58b39158cfe6bbfecb032ed609cc714ab6c02f97).
+With this configuration, your Devise authentication will work seamlessly with Turbo Drive and Turbo Frames.
 
 ---
 
-## Simple Form Setup
+## 3. Simple Form Configuration
 
-**Simple Form** is a Rails form builder gem that simplifies form creation, providing a clean, user-friendly API for generating forms with minimal configuration. It also integrates well with popular CSS frameworks like Bootstrap.
+Simple Form is a powerful form builder that reduces boilerplate and integrates beautifully with CSS frameworks like Bootstrap and Tailwind.
+
+### Installation
 
 ```bash
-# Add Simple Form to your project
 bundle add simple_form
-
-# Generate the Simple Form configuration file
 rails generate simple_form:install
 
-# Or, if you are using Bootstrap, you can use this command:
+# For Bootstrap projects:
 rails generate simple_form:install --bootstrap
 ```
 
-**Apply Simple Form in Devise’s `sessions/new` Page:** Edit `app/views/devise/sessions/new.html.erb` to use simple_form_for, which will streamline the form's structure and style with minimal configuration.
+### Updating Devise Views
 
-```ruby
+Let's refactor the Devise login page to use Simple Form with Tailwind CSS styling:
+
+```erb
+<%# app/views/devise/sessions/new.html.erb %>
+
 <div class="max-w-md mx-auto bg-white shadow-lg rounded-lg p-8 border border-gray-300">
   <h2 class="text-3xl font-bold text-center mb-8 text-gray-800">Log in</h2>
 
   <%= simple_form_for(resource, as: resource_name, url: session_path(resource_name)) do |f| %>
-    <%= f.input :email, label: "Email", input_html: { autofocus: true, autocomplete: "email", class: "mt-2 block w-full border border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50 p-2" }, wrapper_html: { class: "mb-4" } %>
-    <%= f.input :password, label: "Password", input_html: { autocomplete: "current-password", class: "mt-2 block w-full border border-gray-300 rounded-lg shadow-sm focus:border-blue-500 focus:ring focus:ring-blue-500 focus:ring-opacity-50 p-2" }, wrapper_html: { class: "mb-6" } %>
+    <div class="space-y-4">
+      <%= f.input :email,
+                  label: "Email",
+                  required: true,
+                  autofocus: true,
+                  input_html: {
+                    autocomplete: "email",
+                    class: "mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                  } %>
 
-    <% if devise_mapping.rememberable? %>
-      <div class="flex items-center mb-4">
-        <%= f.input :remember_me, as: :boolean, label: false, input_html: { class: "form-checkbox ml-2 h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500" } %>
-        <label class="ml-2 text-sm text-gray-900"><%= f.label :remember_me, "Remember me" %></label>
-      </div>
-    <% end %>
+      <%= f.input :password,
+                  label: "Password",
+                  required: true,
+                  input_html: {
+                    autocomplete: "current-password",
+                    class: "mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                  } %>
 
-    <div class="flex items-center justify-between mb-6 text-sm">
-      <%= render "devise/shared/links" %>
-    </div>
+      <% if devise_mapping.rememberable? %>
+        <%= f.input :remember_me,
+                    as: :boolean,
+                    label: "Remember me",
+                    wrapper_html: { class: "flex items-center" },
+                    input_html: { class: "h-4 w-4 text-blue-600 border-gray-300 rounded" } %>
+      <% end %>
 
-    <div>
-      <%= f.submit "Log in", class: "w-full flex justify-center py-2 px-4 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-200" %>
+      <%= f.button :submit,
+                   "Log in",
+                   class: "w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150" %>
     </div>
   <% end %>
+
+  <div class="mt-6 text-center text-sm text-gray-600">
+    <%= render "devise/shared/links" %>
+  </div>
 </div>
 ```
-The relevant commit for this setup can be found here: [feat: integrate Simple Form with Devise](https://github.com/hamzagedikkaya/leave_master/commit/947361d488ec150ea97176857e5f2b4aeded32e4)
 
 ---
 
-## Image Processing Setup
+## 4. Active Storage & Image Processing
 
-To install the `image processing` gem, remove it from the comment in the `Gemfile` and then run the following command to install the gems:
+Active Storage provides a simple way to attach files to Active Record models. Combined with the `image_processing` gem, we can handle user profile images with validation and transformations.
+
+### Installation
+
+First, uncomment the `image_processing` gem in your Gemfile:
+
+```ruby
+# Gemfile
+gem "image_processing", "~> 1.2"
+```
+
+Then install and set up Active Storage:
 
 ```bash
 bundle install
-
-# After that, install Active Storage with the following command:
 rails active_storage:install
-
-# Finally, run the migrations:
 rails db:migrate
 ```
 
-After that, we can define a profile picture for users.
+### Attaching Images to Users
+
+Update the User model to accept profile images:
 
 ```ruby
 # app/models/user.rb
-has_one_attached :profile_image
 
-# app/views/users/registrations/edit.html.erb
-<%= f.input :profile_image, as: :file, label: "Profile Image", input_html: { accept: 'image/jpeg,image/png,image/jpg' } %>
+class User < ApplicationRecord
+  devise :database_authenticatable, :registerable,
+         :recoverable, :rememberable, :validatable
 
-# To display
-<%= image_tag resource.profile_image if resource.profile_image.attached? %>
-```
+  has_one_attached :profile_image
 
-You can also add custom validation to ensure specific formats and size limits for the profile image. 
-In your `user.rb` model, you can implement the following validation:
+  validate :acceptable_image
 
-```ruby
-validate :acceptable_image
+  private
 
-private
+  def acceptable_image
+    return unless profile_image.attached?
 
-def acceptable_image
-  return unless profile_image.attached?
+    # Validate file size (max 10MB)
+    if profile_image.byte_size > 10.megabytes
+      errors.add(:profile_image, I18n.t("errors.messages.profile_image_too_large", default: "is too large (maximum is 10MB)"))
+    end
 
-  errors.add(:profile_image, I18n.t("errors.messages.profile_image_too_large")) unless profile_image.byte_size <= 10.megabytes
-
-  acceptable_types = ["image/jpg", "image/jpeg", "image/png"]
-  return if acceptable_types.include?(profile_image.content_type)
-
-  errors.add(:profile_image, I18n.t("errors.messages.profile_image_invalid_format"))
+    # Validate content type
+    acceptable_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
+    unless acceptable_types.include?(profile_image.content_type)
+      errors.add(:profile_image, I18n.t("errors.messages.profile_image_invalid_format", default: "must be a JPEG, PNG, or WebP image"))
+    end
+  end
 end
 ```
 
-The relevant commit for this setup can be found here: [feat(profile): add image processing and user profile picture](https://github.com/hamzagedikkaya/leave_master/commit/3e3c00136fa2d81078328670948c7e9ddbefbb2b)
+### Updating the Registration Form
+
+Add the file input to your edit registration view:
+
+```erb
+<%# app/views/devise/registrations/edit.html.erb %>
+
+<%= simple_form_for(resource, as: resource_name, url: registration_path(resource_name), html: { method: :put, multipart: true }) do |f| %>
+  
+  <%# ... other fields ... %>
+
+  <div class="space-y-2">
+    <% if resource.profile_image.attached? %>
+      <div class="mb-4">
+        <%= image_tag resource.profile_image.variant(resize_to_limit: [150, 150]),
+                      class: "rounded-full border-2 border-gray-200" %>
+      </div>
+    <% end %>
+
+    <%= f.input :profile_image,
+                as: :file,
+                label: "Profile Image",
+                hint: "Accepted formats: JPEG, PNG, WebP. Maximum size: 10MB",
+                input_html: {
+                  accept: "image/jpeg,image/png,image/jpg,image/webp",
+                  class: "block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                } %>
+  </div>
+
+  <%# ... submit button ... %>
+<% end %>
+```
+
+### Updating Strong Parameters
+
+Don't forget to permit the `profile_image` parameter in your registrations controller:
+
+```ruby
+# app/controllers/users/registrations_controller.rb
+
+def configure_account_update_params
+  devise_parameter_sanitizer.permit(:account_update, keys: [:name_surname, :gsm, :date_of_birth, :profile_image])
+end
+```
 
 ---
+
+## Conclusion
+
+We've built a complete, modern authentication system that combines the reliability of Devise with the reactivity of Hotwire. Here's what we accomplished:
+
+- **Devise**: Handles all authentication logic with custom user fields
+- **Hotwire**: Provides seamless page updates without full reloads
+- **Simple Form**: Creates clean, maintainable forms with minimal code
+- **Active Storage**: Manages user profile images with proper validation
+
+This setup provides a solid foundation that you can extend with additional features like OAuth providers, two-factor authentication, or email confirmation as your application grows.
+
+---
+
+## Resources
+
+- [Devise Documentation](https://github.com/heartcombo/devise)
+- [Hotwire Documentation](https://hotwired.dev/)
+- [Simple Form Documentation](https://github.com/heartcombo/simple_form)
+- [Active Storage Guide](https://guides.rubyonrails.org/active_storage_overview.html)
