@@ -1,10 +1,20 @@
-title: hamzagedikkaya.github.io
+title: Hamza Gedikkaya | Software Developer & Technical Blog
 email: gedikkayahamza@gmail.com
 author: Hamza Gedikkaya
 description: >-
-  Hamza Gedikkaya Project Documentation
+  Hamza Gedikkaya - Software Developer. Personal blog and portfolio website featuring technical articles about Ruby on Rails, web development, and software engineering. Project documentations by Hamza Gedikkaya.
 baseurl: ""
-url: "http://hamzagedikkaya.github.io"
+url: "https://hamzagedikkaya.github.io"
+
+# SEO Settings
+social:
+  name: Hamza Gedikkaya
+  links:
+    - https://github.com/hamzagedikkaya
+    - https://www.linkedin.com/in/hamza-gedikkaya-9a1823271
+
+webmaster_verifications:
+  google: ""
 favicon: /assets/images/favicon.png
 
 # Yat date format

@@ -4,3 +4,40 @@
   1. Head over to https://realfavicongenerator.net/ to add your own favicons.
   2. Customize default _includes/custom-head.html in your source directory and insert the given code snippet.
 {% endcomment %}
+
+<!-- Structured Data for SEO - Person Schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Person",
+  "name": "Hamza Gedikkaya",
+  "url": "https://hamzagedikkaya.github.io",
+  "sameAs": [
+    "https://github.com/hamzagedikkaya",
+    "https://www.linkedin.com/in/hamza-gedikkaya-9a1823271"
+  ],
+  "jobTitle": "Software Developer",
+  "knowsAbout": ["Ruby on Rails", "Web Development", "Software Engineering"]
+}
+</script>
+
+<!-- Website Schema -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": "Hamza Gedikkaya",
+  "alternateName": "Hamza Gedikkaya Blog",
+  "url": "https://hamzagedikkaya.github.io",
+  "author": {
+    "@type": "Person",
+    "name": "Hamza Gedikkaya"
+  }
+}
+</script>
+
+<!-- Additional SEO Meta Tags -->
+<meta name="keywords" content="Hamza Gedikkaya, Software Developer, Ruby on Rails, Web Development, hamzagedikkaya">
+<meta name="author" content="Hamza Gedikkaya">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://hamzagedikkaya.github.io{{ page.url }}" />
