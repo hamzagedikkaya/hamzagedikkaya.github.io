@@ -1,9 +1,19 @@
-# Hello! 👋
+### Hi, I'm Hamza
 
-I'm a passionate software developer on a journey of continuous growth and learning. 💻 Since June 2023, I’ve been gaining valuable experience at a corporate company, where I tackle innovative projects and sharpen my skills. In my free time, I love sharing my work and insights on my [GitHub.io](https://hamzagedikkaya.github.io) page, showcasing the projects I’ve been crafting. 🛠️
+Ruby on Rails developer. I write about Rails, performance, and the open-source tools I build.
 
-I invite you to explore my portfolio and see what I've been working on by visiting [this page](https://hamzagedikkaya.github.io). 📂
+This repository is the source for **[hamzagedikkaya.github.io](https://hamzagedikkaya.github.io)** — my blog and portfolio.
 
-Curious about the latest project I’m developing? You can dive into the repository [here](https://github.com/hamzagedikkaya/leave_master). 🚀
+#### Currently building
 
-Thank you for taking the time to visit, and I hope you find my work inspiring! 😊
+- **[Meridian](https://github.com/hamzagedikkaya/meridian)** — a self-hosted personal life OS in Rails 8
+- **[Eager Eye](https://github.com/hamzagedikkaya/eager_eye)** — static N+1 detection for Rails apps
+- **[Eager Eye VSCode](https://github.com/hamzagedikkaya/eager_eye_vscode)** — the companion editor extension
+
+#### Stack
+
+Ruby on Rails · PostgreSQL · Hotwire · Tailwind · RSpec — with a particular interest in static analysis, AST tooling, and Rails internals.
+
+#### Reach me
+
+[LinkedIn](https://www.linkedin.com/in/hamza-gedikkaya-9a1823271) · [gedikkayahamza@gmail.com](mailto:gedikkayahamza@gmail.com)
