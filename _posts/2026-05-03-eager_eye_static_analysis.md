@@ -401,6 +401,7 @@ If you try it on a real codebase and find it useful — or find a false positive
 - [EagerEye on GitHub](https://github.com/hamzagedikkaya/eager_eye)
 - [VS Code Extension](https://marketplace.visualstudio.com/items?itemName=hamzagedikkaya.eager-eye)
 - [Beyond N+1: Hidden Performance Traps and Fixes]({% post_url 2025-12-06-beyond_n+1 %}) (the post that motivated this tool)
+- [Meridian]({% post_url 2026-05-23-meridian %}) — Rails 8 app I'm building that ships `eager_eye` in its dev Gemfile
 - [Bullet Gem](https://github.com/flyerhzm/bullet)
 - [Prosopite](https://github.com/charkost/prosopite)
 - [Parser Gem](https://github.com/whitequark/parser) (the AST library EagerEye is built on)

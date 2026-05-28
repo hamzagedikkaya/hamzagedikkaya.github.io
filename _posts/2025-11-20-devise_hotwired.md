@@ -359,6 +359,8 @@ We've built a complete, modern authentication system that combines the reliabili
 
 This setup provides a solid foundation that you can extend with additional features like OAuth providers, two-factor authentication, or email confirmation as your application grows.
 
+If you want to see this exact stack in a real app, [Meridian]({% post_url 2026-05-23-meridian %}) — the self-hosted life OS I'm building — uses the same Devise + Hotwire + Active Storage combination, with custom profile fields (timezone, currency, locale, theme), avatar uploads, and Turbo-friendly failure handling.
+
 ---
 
 ## Resources
