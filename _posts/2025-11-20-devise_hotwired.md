@@ -15,226 +15,250 @@ tags:
   - Authentication
 ---
 
-Building robust user authentication is a fundamental requirement for most web applications. In this guide, we'll walk through setting up a complete authentication system in Rails using Devise, integrating it seamlessly with Hotwire for a modern SPA-like experience, enhancing our forms with Simple Form, and implementing user profile images with Active Storage.
+Authentication is the first thing almost every Rails app needs and the last thing you want to get subtly wrong. This guide walks through a complete, production-shaped setup: **Devise** for the authentication core, **Hotwire** (Turbo + Stimulus) for a snappy, no-custom-JavaScript frontend, **Simple Form** for forms that don't drown in markup, and **Active Storage** for profile images with real validation.
 
-By the end of this guide, you'll have a fully functional authentication system that handles user registration, login, profile management, and image uploads—all working smoothly with Turbo.
+By the end you'll have registration, login, profile editing, and avatar uploads — all working *with* Turbo instead of fighting it.
+
+> *Updated September 2026.* The original version of this post worked around Devise's Turbo incompatibility with a custom failure app. Devise 4.9+ made that unnecessary, and this revision reflects the modern two-line configuration. The legacy approach is kept in a short aside for anyone maintaining an older codebase.
 
 ---
 
 ## Table of Contents
 
-1. [Devise Setup](#1-devise-setup)
-2. [Hotwire Integration](#2-hotwire-integration)
-3. [Simple Form Configuration](#3-simple-form-configuration)
-4. [Active Storage & Image Processing](#4-active-storage--image-processing)
+1. [Devise or the Rails 8 Authentication Generator?](#1-devise-or-the-rails-8-authentication-generator)
+2. [Devise Setup with Custom Fields](#2-devise-setup-with-custom-fields)
+3. [Making Devise Speak Turbo](#3-making-devise-speak-turbo)
+4. [Simple Form Without the Boilerplate](#4-simple-form-without-the-boilerplate)
+5. [Profile Images with Active Storage](#5-profile-images-with-active-storage)
+6. [The Same Stack in a Real App](#6-the-same-stack-in-a-real-app)
 
 ---
 
-## 1. Devise Setup
+## 1. Devise or the Rails 8 Authentication Generator?
 
-Devise is the de facto standard for authentication in Rails applications. It provides a complete MVC solution with modules for password recovery, session management, email confirmation, and more.
+Rails 8 ships `bin/rails generate authentication`, which scaffolds a minimal, readable session + password-reset flow with no dependencies. It's a great starting point if you want to own every line of your auth code.
+
+Devise is the other answer. It gives you, out of the box, the pieces you'd otherwise rebuild one by one: email confirmation, account locking, remember-me cookies, session timeouts, sign-in tracking, OmniAuth hooks, and a decade of security patches behind each of them.
+
+| | Rails 8 generator | Devise |
+|---|---|---|
+| Dependencies | none | one gem |
+| Password reset | yes | yes (`:recoverable`) |
+| Email confirmation | build it | `:confirmable` |
+| Account lockout | build it | `:lockable` |
+| OAuth providers | build it | `:omniauthable` |
+| Session timeout | build it | `:timeoutable` |
+| Customization | edit the generated code | override controllers / views |
+
+My rule of thumb: prototypes and single-purpose apps get the generator, anything that will have real users gets Devise. This guide uses Devise 5.
+
+---
+
+## 2. Devise Setup with Custom Fields
 
 ### Installation
 
 ```bash
 bundle add devise
-rails generate devise:install
-rails generate devise:views
-rails generate devise User
+bin/rails generate devise:install
+bin/rails generate devise:views
+bin/rails generate devise User
 ```
 
-After running the generator, Devise will create a migration file in `db/migrate/`. Before running the migration, let's add some custom fields to our User model.
+The install generator prints a checklist. The one item people skip is the mailer host, and password resets silently break without it:
+
+```ruby
+# config/environments/development.rb
+config.action_mailer.default_url_options = { host: "localhost", port: 3000 }
+```
 
 ### Adding Custom Fields
 
-Open the generated migration file and add the following fields within the `create_table` block:
+Before running the migration, open the generated `db/migrate/*_devise_create_users.rb` and add your own columns inside `create_table`:
 
 ```ruby
-# db/migrate/XXXXXX_devise_create_users.rb
+create_table :users do |t|
+  ## Database authenticatable
+  t.string :email,              null: false, default: ""
+  t.string :encrypted_password, null: false, default: ""
 
-def change
-  create_table :users do |t|
-    ## Database authenticatable
-    t.string :email,              null: false, default: ""
-    t.string :encrypted_password, null: false, default: ""
+  # ... other Devise fields ...
 
-    # ... other Devise fields ...
+  ## Custom fields
+  t.string :name_surname, null: false, default: ""
+  t.string :gsm
+  t.date   :date_of_birth
 
-    ## Custom Fields
-    t.string :name_surname, null: false, default: ""
-    t.string :gsm
-    t.date   :date_of_birth
-
-    t.timestamps null: false
-  end
-
-  add_index :users, :email, unique: true
-  add_index :users, :reset_password_token, unique: true
+  t.timestamps null: false
 end
+
+add_index :users, :email,                unique: true
+add_index :users, :reset_password_token, unique: true
 ```
 
-### Configuring Strong Parameters
+```bash
+bin/rails db:migrate
+```
 
-When adding custom fields, we need to permit them in Devise's strong parameters. First, update your routes to use a custom registrations controller:
+### Permitting the Custom Fields
+
+Devise filters params through its own sanitizer, so new fields need to be permitted for `sign_up` and `account_update`. Point the routes at a custom registrations controller:
 
 ```ruby
 # config/routes.rb
-
-Rails.application.routes.draw do
-  devise_for :users, controllers: { registrations: "users/registrations" }
-  
-  # ... other routes ...
-end
+devise_for :users, controllers: { registrations: "users/registrations" }
 ```
-
-Then create the custom controller:
 
 ```ruby
 # app/controllers/users/registrations_controller.rb
-
 class Users::RegistrationsController < Devise::RegistrationsController
-  before_action :configure_sign_up_params, only: [:create]
-  before_action :configure_account_update_params, only: [:update]
+  before_action :configure_sign_up_params,        only: :create
+  before_action :configure_account_update_params, only: :update
 
-  protected
+  private
+
+  PROFILE_KEYS = %i[name_surname gsm date_of_birth].freeze
 
   def configure_sign_up_params
-    devise_parameter_sanitizer.permit(:sign_up, keys: [:name_surname, :gsm, :date_of_birth])
+    devise_parameter_sanitizer.permit(:sign_up, keys: PROFILE_KEYS)
   end
 
   def configure_account_update_params
-    devise_parameter_sanitizer.permit(:account_update, keys: [:name_surname, :gsm, :date_of_birth])
+    devise_parameter_sanitizer.permit(:account_update, keys: PROFILE_KEYS)
   end
 end
 ```
 
-Now run the migration:
-
-```bash
-rails db:migrate
-```
+Keeping the keys in one constant means adding a field later is a one-line change.
 
 ---
 
-## 2. Hotwire Integration
+## 3. Making Devise Speak Turbo
 
-Hotwire (HTML Over The Wire) is Rails' answer to building reactive applications without writing custom JavaScript. However, Devise was built before Hotwire existed, so we need to make a few adjustments to ensure they work together smoothly.
+### Why it broke in the first place
 
-### The Problem
+Turbo has two opinions about HTTP responses that Devise, written years earlier, didn't share:
 
-By default, when Devise encounters an authentication error (invalid credentials, unauthorized access, etc.), it responds with HTTP status codes that Turbo doesn't handle gracefully. This can result in broken redirects or missing flash messages.
+1. **A form that fails validation must return `422 Unprocessable Content`**, not `200 OK`. Turbo treats a 200 from a form submission as "nothing to render" and silently ignores the body — so your error messages never appear.
+2. **A redirect after a non-GET request should be `303 See Other`**, so Turbo follows it with a GET instead of replaying the original method.
 
-### Creating a Custom Failure App
+Devise's default responder returned `200` on failed sign-in and `302` on redirects. The result was the classic symptom: submit a wrong password, nothing happens.
 
-To handle authentication failures properly with Turbo, create a custom failure app:
+### The fix: two lines (Devise ≥ 4.9)
+
+Devise 4.9 introduced a configurable responder. Set both statuses in the initializer and you're done:
+
+```ruby
+# config/initializers/devise.rb
+Devise.setup do |config|
+  # ...
+
+  # Turbo expects 422 for re-rendered forms and 303 for redirects after POST/PATCH/DELETE.
+  config.responder.error_status    = :unprocessable_content
+  config.responder.redirect_status = :see_other
+end
+```
+
+On Rails < 7.1 the status symbol is `:unprocessable_entity`; Rack 3.1 renamed it to `:unprocessable_content` and the old name now logs a deprecation warning.
+
+You do **not** need to add `:turbo_stream` to `navigational_formats` unless you're rendering `turbo_stream` responses from Devise actions yourself. The default `['*/*', :html]` handles regular Turbo Drive navigation.
+
+### Sign-out needs a button, not a link
+
+`rails-ujs` is gone, so `link_to ..., method: :delete` no longer sends a DELETE. Use `button_to`:
+
+```erb
+<%= button_to "Sign out", destroy_user_session_path, method: :delete,
+      class: "text-sm text-gray-600 hover:text-gray-900" %>
+```
+
+If you'd rather keep it a link, set `config.sign_out_via = :get` in the initializer — but a button is the safer default, since GET requests with side effects can be triggered by prefetching.
+
+<details markdown="1">
+<summary><strong>Legacy aside: the custom failure app (Devise &lt; 4.9)</strong></summary>
+
+Before 4.9, the community workaround was to subclass `Devise::FailureApp` so Turbo Stream requests got a redirect instead of a 401:
 
 ```ruby
 # lib/turbo_failure_app.rb
-
 class TurboFailureApp < Devise::FailureApp
   def respond
-    if request_format == :turbo_stream
-      redirect
-    else
-      super
-    end
+    request_format == :turbo_stream ? redirect : super
   end
 
   def skip_format?
     %w[html turbo_stream */*].include?(request_format.to_s)
   end
 end
-```
 
-### Configuring Devise for Turbo
-
-Update your Devise initializer to use the custom failure app:
-
-```ruby
 # config/initializers/devise.rb
-
-# Ensure the custom failure app is loaded
-require "turbo_failure_app"
-
-Devise.setup do |config|
-  # ... other configurations ...
-
-  # Add turbo_stream to navigational formats
-  config.navigational_formats = ["*/*", :html, :turbo_stream]
-
-  # Configure Warden to use our custom failure app
-  config.warden do |manager|
-    manager.failure_app = TurboFailureApp
-  end
-end
+config.navigational_formats = ["*/*", :html, :turbo_stream]
+config.warden { |manager| manager.failure_app = TurboFailureApp }
 ```
 
-### How It Works
-
-| Component | Purpose |
-|-----------|---------|
-| `TurboFailureApp` | Intercepts authentication failures and ensures proper redirect behavior for Turbo Stream requests |
-| `skip_format?` | Allows the failure app to handle HTML, Turbo Stream, and wildcard formats |
-| `navigational_formats` | Tells Devise which response formats should trigger redirects instead of 401 responses |
-
-With this configuration, your Devise authentication will work seamlessly with Turbo Drive and Turbo Frames.
+If you find this in a codebase you maintain, you can delete it once you're on Devise 4.9 or later and set the two responder statuses above instead.
+</details>
 
 ---
 
-## 3. Simple Form Configuration
+## 4. Simple Form Without the Boilerplate
 
-Simple Form is a powerful form builder that reduces boilerplate and integrates beautifully with CSS frameworks like Bootstrap and Tailwind.
-
-### Installation
+Simple Form wraps label, input, hint, and error rendering into one `f.input` call. Install it and, if you use Tailwind, skip the Bootstrap flag:
 
 ```bash
 bundle add simple_form
-rails generate simple_form:install
-
-# For Bootstrap projects:
-rails generate simple_form:install --bootstrap
+bin/rails generate simple_form:install
 ```
 
-### Updating Devise Views
+### Put the CSS classes in the wrapper, not the view
 
-Let's refactor the Devise login page to use Simple Form with Tailwind CSS styling:
+The most common Simple Form mistake with Tailwind is pasting a 200-character class string into every input. Define a wrapper once instead:
+
+```ruby
+# config/initializers/simple_form_tailwind.rb
+SimpleForm.setup do |config|
+  config.wrappers :tailwind, tag: "div", class: "space-y-1", error_class: "has-error" do |b|
+    b.use :html5
+    b.use :placeholder
+    b.optional :maxlength
+    b.optional :pattern
+    b.optional :readonly
+
+    b.use :label, class: "block text-sm font-medium text-gray-700"
+    b.use :input,
+          class: "mt-1 block w-full rounded-md border border-gray-300 px-3 py-2 shadow-sm " \
+                 "focus:border-blue-500 focus:ring-blue-500",
+          error_class: "border-red-500"
+    b.use :hint,  wrap_with: { tag: "p", class: "text-xs text-gray-500" }
+    b.use :error, wrap_with: { tag: "p", class: "text-xs text-red-600" }
+  end
+
+  config.default_wrapper = :tailwind
+  config.button_class    = "w-full rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white " \
+                           "hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+end
+```
+
+### The login view, now readable
 
 ```erb
 <%# app/views/devise/sessions/new.html.erb %>
-
-<div class="max-w-md mx-auto bg-white shadow-lg rounded-lg p-8 border border-gray-300">
-  <h2 class="text-3xl font-bold text-center mb-8 text-gray-800">Log in</h2>
+<div class="mx-auto max-w-md rounded-lg border border-gray-200 bg-white p-8 shadow-lg">
+  <h2 class="mb-8 text-center text-3xl font-bold text-gray-800">Log in</h2>
 
   <%= simple_form_for(resource, as: resource_name, url: session_path(resource_name)) do |f| %>
     <div class="space-y-4">
-      <%= f.input :email,
-                  label: "Email",
-                  required: true,
-                  autofocus: true,
-                  input_html: {
-                    autocomplete: "email",
-                    class: "mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  } %>
-
-      <%= f.input :password,
-                  label: "Password",
-                  required: true,
-                  input_html: {
-                    autocomplete: "current-password",
-                    class: "mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                  } %>
+      <%= f.input :email,    required: true, autofocus: true,
+                  input_html: { autocomplete: "email" } %>
+      <%= f.input :password, required: true,
+                  input_html: { autocomplete: "current-password" } %>
 
       <% if devise_mapping.rememberable? %>
-        <%= f.input :remember_me,
-                    as: :boolean,
-                    label: "Remember me",
-                    wrapper_html: { class: "flex items-center" },
-                    input_html: { class: "h-4 w-4 text-blue-600 border-gray-300 rounded" } %>
+        <%= f.input :remember_me, as: :boolean, wrapper: :default,
+                    wrapper_html: { class: "flex items-center gap-2" } %>
       <% end %>
 
-      <%= f.button :submit,
-                   "Log in",
-                   class: "w-full py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150" %>
+      <%= f.button :submit, "Log in" %>
     </div>
   <% end %>
 
@@ -244,128 +268,151 @@ Let's refactor the Devise login page to use Simple Form with Tailwind CSS stylin
 </div>
 ```
 
+Same result as the class-per-input version, a third of the markup, and every form in the app looks consistent by default.
+
 ---
 
-## 4. Active Storage & Image Processing
-
-Active Storage provides a simple way to attach files to Active Record models. Combined with the `image_processing` gem, we can handle user profile images with validation and transformations.
+## 5. Profile Images with Active Storage
 
 ### Installation
 
-First, uncomment the `image_processing` gem in your Gemfile:
+```bash
+bin/rails active_storage:install
+bin/rails db:migrate
+```
+
+Add the image processing gems. Note that `image_processing` 2.x **no longer pulls in a processor** — you have to pick one explicitly:
 
 ```ruby
 # Gemfile
-gem "image_processing", "~> 1.2"
+gem "image_processing", "~> 2.0"
+gem "ruby-vips"     # fast, low-memory; needs libvips installed
+# or: gem "mini_magick"   # if ImageMagick is what your host already has
 ```
 
-Then install and set up Active Storage:
-
-```bash
-bundle install
-rails active_storage:install
-rails db:migrate
+```ruby
+# config/application.rb
+config.active_storage.variant_processor = :vips   # or :mini_magick
 ```
 
-### Attaching Images to Users
+### Attaching and validating
 
-Update the User model to accept profile images:
+Active Storage doesn't ship attachment validations, so add your own — and use Rails 7's **named variants** so the thumbnail size is defined once, on the model, not scattered across views:
 
 ```ruby
 # app/models/user.rb
-
 class User < ApplicationRecord
   devise :database_authenticatable, :registerable,
          :recoverable, :rememberable, :validatable
 
-  has_one_attached :profile_image
+  ACCEPTED_IMAGE_TYPES = %w[image/jpeg image/png image/webp].freeze
+  MAX_IMAGE_SIZE       = 10.megabytes
 
-  validate :acceptable_image
+  has_one_attached :profile_image do |attachable|
+    attachable.variant :thumb,  resize_to_limit: [150, 150]
+    attachable.variant :avatar, resize_to_fill:  [40, 40]
+  end
+
+  validate :acceptable_profile_image
 
   private
 
-  def acceptable_image
+  def acceptable_profile_image
     return unless profile_image.attached?
 
-    # Validate file size (max 10MB)
-    if profile_image.byte_size > 10.megabytes
-      errors.add(:profile_image, I18n.t("errors.messages.profile_image_too_large", default: "is too large (maximum is 10MB)"))
+    if profile_image.byte_size > MAX_IMAGE_SIZE
+      errors.add(:profile_image, :too_large, max: "10MB")
     end
 
-    # Validate content type
-    acceptable_types = ["image/jpeg", "image/jpg", "image/png", "image/webp"]
-    unless acceptable_types.include?(profile_image.content_type)
-      errors.add(:profile_image, I18n.t("errors.messages.profile_image_invalid_format", default: "must be a JPEG, PNG, or WebP image"))
+    unless ACCEPTED_IMAGE_TYPES.include?(profile_image.content_type)
+      errors.add(:profile_image, :invalid_format, formats: "JPEG, PNG or WebP")
     end
   end
 end
 ```
 
-### Updating the Registration Form
+```yaml
+# config/locales/en.yml
+en:
+  activerecord:
+    errors:
+      models:
+        user:
+          attributes:
+            profile_image:
+              too_large: "is too large (maximum is %{max})"
+              invalid_format: "must be a %{formats} image"
+```
 
-Add the file input to your edit registration view:
+Using error *keys* instead of inline strings keeps the messages translatable — which matters the moment your app grows a second language.
+
+### The edit form
 
 ```erb
 <%# app/views/devise/registrations/edit.html.erb %>
+<%= simple_form_for(resource, as: resource_name, url: registration_path(resource_name),
+                    html: { method: :put, multipart: true }) do |f| %>
 
-<%= simple_form_for(resource, as: resource_name, url: registration_path(resource_name), html: { method: :put, multipart: true }) do |f| %>
-  
-  <%# ... other fields ... %>
+  <%# ... name, gsm, date_of_birth, email, passwords ... %>
 
   <div class="space-y-2">
     <% if resource.profile_image.attached? %>
-      <div class="mb-4">
-        <%= image_tag resource.profile_image.variant(resize_to_limit: [150, 150]),
-                      class: "rounded-full border-2 border-gray-200" %>
-      </div>
+      <%= image_tag resource.profile_image.variant(:thumb),
+                    class: "mb-4 rounded-full border-2 border-gray-200" %>
     <% end %>
 
-    <%= f.input :profile_image,
-                as: :file,
-                label: "Profile Image",
-                hint: "Accepted formats: JPEG, PNG, WebP. Maximum size: 10MB",
+    <%= f.input :profile_image, as: :file,
+                hint: "JPEG, PNG or WebP · max 10MB",
                 input_html: {
-                  accept: "image/jpeg,image/png,image/jpg,image/webp",
-                  class: "block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                  accept: User::ACCEPTED_IMAGE_TYPES.join(","),
+                  class:  "block w-full text-sm text-gray-500 file:mr-4 file:rounded-md " \
+                          "file:border-0 file:bg-blue-50 file:px-4 file:py-2 file:text-blue-700"
                 } %>
   </div>
 
-  <%# ... submit button ... %>
+  <%= f.button :submit, "Update" %>
 <% end %>
 ```
 
-### Updating Strong Parameters
-
-Don't forget to permit the `profile_image` parameter in your registrations controller:
+And permit the new key:
 
 ```ruby
-# app/controllers/users/registrations_controller.rb
-
-def configure_account_update_params
-  devise_parameter_sanitizer.permit(:account_update, keys: [:name_surname, :gsm, :date_of_birth, :profile_image])
-end
+PROFILE_KEYS = %i[name_surname gsm date_of_birth profile_image].freeze
 ```
+
+Because the form now returns `422` on a failed validation (thanks to §3), an oversized upload re-renders the form with the error message inline — no page reload, no lost input.
+
+---
+
+## 6. The Same Stack in a Real App
+
+Everything above is exactly what [Meridian]({% post_url 2026-05-23-meridian %}) — the self-hosted life OS I'm building — runs on. A few details from that codebase that go one step further than this tutorial:
+
+- **Preferences live on the user.** Timezone, currency, locale (Turkish / English), theme, and weekly-review day are Devise custom fields, permitted the same way as `name_surname` here. A multi-tab Settings page edits them.
+- **Devise for the browser, bearer tokens for the phone.** The Flutter companion app doesn't use cookies. Each user has an `api_token`; the API controllers inherit from `ActionController::API` and authenticate with a one-line `Authorization: Bearer` check. Two auth paths, one `User` table.
+- **No password-reset email.** It's a single-user, local-first app, so `:recoverable` stays on but SMTP is deliberately unconfigured. A forgotten password is reset from the Rails console — no phishing surface, no "link expired" friction.
+- **`image_processing` + `mini_magick`,** declared explicitly, because the deployment host has ImageMagick but not libvips. That's the exact 2.x gotcha from §5, encountered in production.
 
 ---
 
 ## Conclusion
 
-We've built a complete, modern authentication system that combines the reliability of Devise with the reactivity of Hotwire. Here's what we accomplished:
+The modern Devise + Hotwire setup is a lot less code than it used to be:
 
-- **Devise**: Handles all authentication logic with custom user fields
-- **Hotwire**: Provides seamless page updates without full reloads
-- **Simple Form**: Creates clean, maintainable forms with minimal code
-- **Active Storage**: Manages user profile images with proper validation
+- **Devise** — battle-tested authentication with a clean path for custom fields
+- **Two responder statuses** — the entire Turbo fix, replacing the old failure-app subclass
+- **Simple Form with a wrapper** — consistent forms without repeating class strings
+- **Active Storage named variants** — thumbnails defined once, validated with translatable error keys
 
-This setup provides a solid foundation that you can extend with additional features like OAuth providers, two-factor authentication, or email confirmation as your application grows.
-
-If you want to see this exact stack in a real app, [Meridian]({% post_url 2026-05-23-meridian %}) — the self-hosted life OS I'm building — uses the same Devise + Hotwire + Active Storage combination, with custom profile fields (timezone, currency, locale, theme), avatar uploads, and Turbo-friendly failure handling.
+From here the natural extensions are `:confirmable` for email verification, `:omniauthable` for social login, and `devise-two-factor` for TOTP — each one a module flag away.
 
 ---
 
 ## Resources
 
-- [Devise Documentation](https://github.com/heartcombo/devise)
-- [Hotwire Documentation](https://hotwired.dev/)
-- [Simple Form Documentation](https://github.com/heartcombo/simple_form)
-- [Active Storage Guide](https://guides.rubyonrails.org/active_storage_overview.html)
+- [Devise](https://github.com/heartcombo/devise) — see the "Hotwire/Turbo" section of the README
+- [Hotwire](https://hotwired.dev/)
+- [Simple Form](https://github.com/heartcombo/simple_form)
+- [Active Storage Overview](https://guides.rubyonrails.org/active_storage_overview.html)
+- [Rails 8 authentication generator](https://guides.rubyonrails.org/security.html#authentication)
+- [Meridian]({% post_url 2026-05-23-meridian %}) — the app that runs this stack
