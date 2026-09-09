@@ -18,9 +18,11 @@ tags:
   - Open Source
 ---
 
-A few months ago I wrote [Beyond N+1: Hidden Performance Traps and Fixes]({% post_url 2025-12-06-beyond_n+1 %}) about the performance killers Bullet can't catch — queries inside custom methods, serializer-induced query explosions, callback-driven inserts, and so on. The post ended with a list of techniques and tools to work around Bullet's blind spots, but it didn't really answer the obvious follow-up question: *can we catch these automatically, in CI, without running a single test?*
+A few months ago I wrote [Beyond N+1: Hidden Performance Traps and Fixes]({% post_url 2025-12-06-beyond_n+1 %}) about the performance killers Bullet can't catch — queries inside custom methods, serializer-induced query explosions, callback-driven inserts, `.count` on a collection you already preloaded. The post ended with a list of workarounds, but it dodged the obvious follow-up: *can we catch these automatically, in CI, without running a single test?*
 
-That's the gap [EagerEye](https://github.com/hamzagedikkaya/eager_eye) tries to close. It's a static analyzer for Rails — no DB, no Rails boot, no runtime hooks. It parses your Ruby files into an AST and looks for patterns that turn into N+1 queries at runtime. In this post I'll walk through the design decisions behind it, show what it catches that Bullet can't, share the real-world numbers from running it on production codebases, and explain how to wire it into CI in five lines of YAML.
+[EagerEye](https://github.com/hamzagedikkaya/eager_eye) is my answer. It's a static analyzer for Rails: no database, no Rails boot, no runtime hooks. It parses your Ruby into an AST and looks for the patterns that become N+1 queries at runtime. This post covers the design decisions behind it, what it catches that Bullet can't, the honest numbers from running it on two production codebases — including the false-positive rate I got wrong the first time — and how to wire it into CI in a handful of lines.
+
+> *Updated September 2026 for EagerEye 1.3.3.* Since the original version of this post: baseline mode shipped (it was on the roadmap), the analyzer became schema-aware, serializer detection learned to look at render sites, and a large hand-verification pass cut false positives by roughly half. Sections 3, 4, 6 and 10 changed the most.
 
 ---
 
@@ -31,31 +33,34 @@ That's the gap [EagerEye](https://github.com/hamzagedikkaya/eager_eye) tries to 
 3. [Design Decisions: Why This and Not That](#3-design-decisions-why-this-and-not-that)
 4. [Real-World Results: Two Production Codebases](#4-real-world-results-two-production-codebases)
 5. [Installation and First Scan](#5-installation-and-first-scan)
-6. [CI Integration: Five Lines of YAML](#6-ci-integration-five-lines-of-yaml)
-7. [VS Code Extension: Same Engine, in Your Editor](#7-vs-code-extension-same-engine-in-your-editor)
-8. [Suppressing False Positives](#8-suppressing-false-positives)
-9. [Known Limitations](#9-known-limitations)
-10. [Roadmap and How to Contribute](#10-roadmap-and-how-to-contribute)
+6. [CI Integration and Baseline Mode](#6-ci-integration-and-baseline-mode)
+7. [RSpec Matcher and Auto-fix](#7-rspec-matcher-and-auto-fix)
+8. [VS Code Extension: Same Engine, in Your Editor](#8-vs-code-extension-same-engine-in-your-editor)
+9. [Suppressing False Positives](#9-suppressing-false-positives)
+10. [Known Limitations](#10-known-limitations)
+11. [Roadmap and How to Contribute](#11-roadmap-and-how-to-contribute)
 
 ---
 
 ## 1. Why Static Analysis?
 
-Bullet is a runtime tool. It hooks into ActiveRecord's association loading mechanism and notices when you call an association that wasn't preloaded. This is brilliant when it works, but it has a fundamental constraint: **the code path has to actually run**.
+Bullet is a runtime tool. It hooks into ActiveRecord's association loading and notices when you touch an association that wasn't preloaded. Brilliant when it fires — but it has one hard constraint: **the code path has to actually run.**
 
-Most teams I've worked with have decent test coverage for their happy paths but limited coverage for everything else: admin actions, error branches, rarely-hit feature flags, background jobs that only fire on specific events. Bullet sees nothing in any of those code paths. Worse, if the test happens to use fewer records than would trigger an N+1 in production (`create(:user, :with_posts)` in a fixture vs. 10,000 users in prod), you can pass tests with hidden N+1s.
+Most teams have good coverage of their happy paths and thin coverage of everything else: admin actions, error branches, feature flags, jobs that only fire on specific events. Bullet sees nothing in any of those. Worse, a test that creates two records will never hit the threshold that ten thousand production rows would, so you can pass a green suite with a hidden N+1 in it.
 
-Static analysis solves a different problem. It reads every line of code, regardless of whether it ever executes. It finds patterns. It doesn't need fixtures, doesn't need a DB, doesn't need Redis. It runs in milliseconds per file, not minutes.
+Static analysis reads every line whether or not it ever executes. It needs no fixtures, no database, no Redis, and it runs in seconds on a whole codebase rather than minutes per test run.
 
-The trade-off is that it can't verify anything. A heuristic that matches `posts.each { |p| p.author }` might be flagging a real N+1 — or it might be flagging code where `posts` was already preloaded somewhere static analysis can't see. The only honest path forward is to design the tool around minimizing false positives, even if it costs some false negatives.
+The trade-off is that it can't *verify* anything. A pattern that matches `posts.each { |p| p.author }` may be a real N+1 — or `posts` may have been preloaded somewhere the analyzer can't see. So the only honest way to build the tool is to design it around minimizing false positives, even at the cost of some false negatives:
 
-That principle — **a warning you can trust is more useful than a warning you have to investigate** — is what shaped the entire design.
+> **A warning you can trust is worth more than a warning you have to investigate.**
+
+That sentence shaped every decision below.
 
 ---
 
 ## 2. What EagerEye Catches
 
-EagerEye ships 11 detectors. Some overlap with Bullet (the simple loop case), most don't.
+EagerEye ships **11 detectors**. One overlaps with Bullet; the rest target patterns Bullet is structurally blind to.
 
 ### LoopAssociation — the obvious one
 
@@ -66,7 +71,7 @@ posts.each do |post|
 end
 ```
 
-EagerEye flags both lines and suggests `.includes(:author, :comments)`. So does Bullet, *if* this code is exercised by a test that loops over enough posts. But if the loop is in an admin export controller that nobody tests, Bullet stays silent. EagerEye doesn't care — it sees the loop and the association access regardless.
+Flagged with a suggestion to add `.includes(:author, :comments)`. Bullet catches this too — *if* a test loops over enough posts. If the loop lives in an admin export nobody tests, only EagerEye sees it.
 
 ### CustomMethodQuery — the one Bullet can't see
 
@@ -82,29 +87,28 @@ end
 @users.each { |user| user.supports?("Lakers") }
 ```
 
-This is the example I opened the [previous post]({% post_url 2025-12-06-beyond_n+1 %}#2-hidden-n1s-in-custom-methods) with. Bullet can't catch it because `teams.where(...)` bypasses the association loading hook. EagerEye scans every model file once, builds a map of which methods contain query calls, then flags any iteration that calls one of those methods on the iteration variable.
+This is the example the [previous post]({% post_url 2025-12-06-beyond_n+1 %}#2-hidden-n1s-in-custom-methods) opened with. `teams.where(...)` builds a new relation and bypasses the association cache, so Bullet never hears about it. EagerEye scans every model once, builds a map of which methods contain query calls, then flags any iteration that calls one of those methods on the loop variable — scoped per model, so `obj.foo` isn't flagged just because some *other* model has a `def foo` with a query in it.
 
 ### SerializerNesting — query explosions in JSON
 
 ```ruby
 class PostSerializer < Blueprinter::Base
-  field :author_name { |post| post.author.name }
+  field(:author_name) { |post| post.author.name }
 end
 
-# Controller — no preload
-render json: PostSerializer.render(@posts)
+render json: PostSerializer.render(@posts)   # no preload
 ```
 
-Serializers are an N+1 graveyard. They run once per record, often access nested associations, and the controller doesn't always know which fields the serializer touches. EagerEye scans Blueprinter, ActiveModel::Serializer, and Alba blocks for nested association access and suggests preloading at the source.
+Serializers run once per record, reach into associations, and the controller rarely knows which fields they touch. EagerEye understands Blueprinter, ActiveModel::Serializers and Alba, and — since 1.3.1 — also looks at *where* a serializer is rendered, so it stays quiet when every render site preloads the association (more in §3).
 
 ### CountInIteration — the `.count` vs `.size` trap
 
 ```ruby
 @users = User.includes(:posts)
-@users.each { |user| user.posts.count }   # SELECT COUNT(*) per user, even though posts are loaded
+@users.each { |user| user.posts.count }   # SELECT COUNT(*) per user, preload ignored
 ```
 
-`.count` always queries. `.size` uses the loaded array if available. Bullet doesn't catch this because the association *is* preloaded — you're just not using the preload. EagerEye flags every `.count` on an association inside an iteration block.
+`.count` always queries; `.size` uses the loaded array. Bullet can't flag this because the association *is* preloaded — you're just not using the preload.
 
 ### CallbackQuery — the silent killer
 
@@ -113,32 +117,37 @@ class Order < ApplicationRecord
   after_create :notify_subscribers
 
   def notify_subscribers
-    customer.followers.each do |follower|
-      follower.notifications.create!(...)   # N inserts + N queries per save
-    end
+    customer.followers.each { |f| f.notifications.create!(...) }   # N inserts + N queries per save
   end
 end
 ```
 
-`Order.import(big_array)` triggers the callback for every record. Per record, you get an iteration that fires queries. Bullet usually doesn't run during background jobs and doesn't track `create!` patterns. EagerEye specifically scans `after_*` / `before_*` / `around_*` callback bodies for iteration-driven queries.
+`Order.import(big_array)` fires this once per record. Bullet rarely runs during jobs and doesn't track `create!` patterns; EagerEye specifically inspects `before_*` / `after_*` / `around_*` bodies for iteration-driven queries.
 
 ### And six more
 
-`MissingCounterCache`, `PluckToArray`, `DelegationNPlusOne`, `DecoratorNPlusOne`, `ScopeChainNPlusOne`, `ValidationNPlusOne` — each targets a pattern from the previous post. The full list with code samples lives in the [README](https://github.com/hamzagedikkaya/eager_eye#what-it-detects).
+| Detector | Catches |
+|---|---|
+| `MissingCounterCache` | `.count` / `.size` on an association inside a loop where a counter cache would remove the query entirely |
+| `PluckToArray` | `.pluck(:id)` fed into `where(id: ...)` instead of a subquery; an unscoped `.all.pluck` is escalated to **error** |
+| `DelegationNPlusOne` | `delegate :name, to: :user` — reads that look like attributes but load an association per row |
+| `DecoratorNPlusOne` | Draper / SimpleDelegator / presenter methods that touch associations, called after `.decorate` with no preload |
+| `ScopeChainNPlusOne` | Named scopes (`.recent`, `.active`) on an association inside a loop — a query hidden behind a friendly name |
+| `ValidationNPlusOne` | `Model.create` in a loop where the model has a uniqueness validation — a `SELECT` before every `INSERT` |
+
+All detectors understand `each`, `map`, `find_each`, `in_batches`, `each_with_object`, `reduce`, and friends. Ruby files, `.jbuilder` templates, and Ruby 3.1+ syntax are supported. Full examples for every detector are in the [README](https://github.com/hamzagedikkaya/eager_eye#what-it-detects).
 
 ---
 
 ## 3. Design Decisions: Why This and Not That
 
-### Why AST instead of regex
+### AST, not regex
 
-The naive approach to "find loops with association calls" is a regex like `/each.*\.(\w+)\.\w+/`. This breaks on the first multi-line block, misses Hash literals, and confuses string interpolation with method calls. AST parsing means we work with the actual structure Ruby sees: `:block` nodes contain a `:send` (the iteration call), an `:args` list, and a body of statements. Walking that tree is annoying but reliable.
+The naive approach — `/each.*\.(\w+)\.\w+/` — dies on the first multi-line block, misreads string interpolation, and can't tell a hash key from a method call. EagerEye uses [`whitequark/parser`](https://github.com/whitequark/parser), the same AST library RuboCop is built on. A `:block` node has a `:send` (the iteration call), an `:args` list, and a body; walking that tree is tedious but reliable, and it's the only way to reason about *which variable* is being iterated and *where it came from*.
 
-The implementation uses [`whitequark/parser`](https://github.com/whitequark/parser), the same parser RuboCop uses. Ruby 3.1+ syntax is supported.
+### Per-method scope for variable tracking
 
-### Why per-method scope tracking
-
-One of the gnarlier bugs in early versions was this:
+One of the nastier early bugs:
 
 ```ruby
 def index
@@ -146,50 +155,54 @@ def index
   @data = invoices.map { |i| [i.customer.name, i.merchant.name] }
 end
 
-def some_other_action
-  invoices = Invoice.where(id: params[:ids])  # no includes here
-  invoices.update_all(status: 'archived')
+def archive
+  invoices = Invoice.where(id: params[:ids])   # no includes
+  invoices.update_all(status: "archived")
 end
 ```
 
-The first version of EagerEye tracked `invoices` globally across the file. So when it processed `def some_other_action`, the `invoices` variable assignment overwrote the preload information from `def index`, and the iteration in `index` started getting flagged for N+1 even though `:customer` and `:merchant` were preloaded.
+The first version tracked `invoices` across the whole file, so the assignment in `archive` overwrote the preload information from `index`, and a perfectly preloaded loop got flagged. The fix: each `:def` body is an independent scope that inherits a snapshot from its parent but whose writes never leak out. That alone removed 19 false positives on one codebase.
 
-The fix was treating each `:def` body as an independent scope: variables inherit a snapshot from the enclosing scope, but writes inside a method don't leak out. This is closer to how Ruby actually works and eliminated about 19 false positives on the iwallet codebase alone.
+### Caller-to-callee preload propagation
 
-### Why caller-method preload tracking
-
-A common Rails pattern is to extract serialization into a helper:
+Rails controllers extract helpers constantly:
 
 ```ruby
 def index
   @users = User.includes(:profile, :organization)
-  @data = prepare_data(@users)
+  @rows  = prepare_rows(@users)
 end
 
 private
 
-def prepare_data(users)
+def prepare_rows(users)
   users.map { |u| [u.profile.bio, u.organization.name] }
 end
 ```
 
-The iteration is in `prepare_data`. Static analysis can see that `users` is a method parameter — but without inter-procedural analysis, it can't know that the only caller (`index`) preloads `:profile` and `:organization`.
+The loop is in `prepare_rows`, whose parameter has no preload context on its own. EagerEye does two passes per class: the first records every self-call along with the caller's variable state at the call site; the second analyzes each method with its parameters seeded from the merged caller context. If any caller preloads `:profile`, the parameter inherits it. Merging permissively (any preloading caller suppresses the warning) is a deliberate false-negative trade.
 
-EagerEye does a two-pass analysis per class: pass 1 collects every self-call between sibling methods along with the caller's variable state at the call site; pass 2 processes each method with its parameters seeded from the merged caller context. If at least one caller preloads `:profile`, the parameter inherits that preload. This handles the helper-method pattern that's everywhere in Rails controllers.
+### Schema awareness without a database connection (1.3.1)
 
-### Why prefer false negatives over false positives
+When the analyzer can't infer the model of a loop variable, it used to fall back to guessing whether `record.vat_rate` is a column or an association. Now it reads `db/schema.rb` — found by walking up from the scanned path — and learns every table's real columns. A method whose name the schema knows as a column is never flagged as a query. It still never connects to a database, parses SQL, or needs Rails loaded; if there's no `schema.rb`, the guard is simply off.
 
-This is the philosophical decision the entire tool rests on. Every heuristic has knobs. You can lean toward "flag anything that looks suspicious" — high recall, lots of noise, users start ignoring warnings within a week. Or you can lean toward "only flag what we're confident about" — lower recall, but every warning is actionable.
+### Render-site awareness for serializers (1.3.1)
 
-EagerEye picks the second path. When in doubt, suppress. When a method has multiple callers and only some preload an association, treat it as preloaded (better to miss a real N+1 than to flag a non-issue). When a model isn't in the parsed set, defer to a small hardcoded list of well-known association names rather than flagging every method call on a loop variable.
+`SerializerNesting` used to flag every nested association access in every serializer, regardless of what the controller did. Now a second parser scans render sites — `PostBlueprint.render(...)`, AMS `serializer:` / `each_serializer:` — and records, per serializer and view, which associations are preloaded and whether the serializer only ever receives single records. If every render site preloads `:author`, the warning is suppressed. A view EagerEye never sees rendered is still reported: it never concludes "safe" from a lack of evidence.
 
-The result: in the two production codebases I tested it on, the false positive rate is under 1%. Every flag is worth investigating.
+### One warning per association per iteration
+
+A memoized `belongs_to` read five times in one loop body used to produce five warnings. Repeated reads hit Rails' instance-level association cache, not the database, so `LoopAssociation` now reports each association once per iteration. Associations used as the base of a query chain (`x.assoc.find_by`, `x.assoc.where`) still report every occurrence, because those *do* re-query.
+
+### Prefer false negatives over false positives
+
+Every heuristic has a knob. Turn it toward "flag anything suspicious" and users learn to ignore the tool within a week. Turn it toward "only flag what we're confident about" and every warning becomes actionable. EagerEye picks the second setting everywhere: when a method has some preloading callers and some not, treat it as preloaded; when a model isn't in the parsed set and the schema doesn't help, defer to a short list of well-known association names; when a save skips validations, don't flag `ValidationNPlusOne`. Section 4 shows what that policy costs and buys.
 
 ---
 
 ## 4. Real-World Results: Two Production Codebases
 
-I ran EagerEye through two production Rails apps I work on. Both are 5+ years old, multi-thousand-file codebases with mature test suites. Bullet runs in their dev environment and catches the N+1s that show up in tests. Here's what EagerEye found on top of that.
+I ran EagerEye on two production Rails apps I work on. Both are 5+ years old, multi-thousand-file codebases with mature test suites and Bullet enabled in development. This is what the analyzer found *on top of* what Bullet already reports.
 
 ### Codebase A (~160 files affected)
 
@@ -207,8 +220,6 @@ I ran EagerEye through two production Rails apps I work on. Both are 5+ years ol
 | DelegationNPlusOne | 1 |
 | **Total** | **827** |
 
-I sampled ~50 issues across detectors and manually verified them against the actual code paths. Real positives: 49. False positives: 1 (and that one was in a code path Bullet also can't see — it's a "controller passes preloaded relation to a service object in another file" case).
-
 ### Codebase B (~70 files affected)
 
 | Detector | Issues |
@@ -221,13 +232,23 @@ I sampled ~50 issues across detectors and manually verified them against the act
 | ScopeChainNPlusOne | 1 |
 | **Total** | **220** |
 
-Same sampling exercise: 100% real positives in my sample.
+### The number I got wrong
 
-### What this means in practice
+When this post was first published, I had sampled about 50 findings by hand and found one false positive. I wrote "under 1%". Then I did the thing I should have done first and hand-checked **all ~1,080 findings** across both codebases.
 
-These aren't all "production-blocking" issues. Some are admin-export controllers that run once a week. Some are background jobs that happen to be fast despite the N+1 because each query is tiny. But every single one is a place where someone made a decision (intentionally or not) to leave a query-per-iteration pattern in the code, and they probably didn't know.
+| | Before 1.3.1 | After 1.3.1 |
+|---|---:|---:|
+| Hand-verified findings | ~1,080 | ~1,080 |
+| False positives | 339 (~31%) | 158 (~15%) |
+| Real findings lost by the changes | — | 5 |
 
-The really useful warnings are the ones in hot paths. SerializerNesting in `Api::V2::ProductsSerializer` rendered millions of times a day is a different problem than a one-off `db:seed` script. EagerEye flags both, and you decide which to fix.
+Thirty-one percent is not "under one percent". The gap came from exactly the places you'd expect: column reads on receivers whose model couldn't be inferred (`record.comsn_rate`), the same memoized `belongs_to` reported five times, and serializers flagged even when every controller preloaded the association. Those three findings became the schema guard, per-iteration dedup, and render-site awareness in §3, and the pass cut false positives by 53% while losing five real findings out of roughly 740.
+
+Fifteen percent still isn't zero, and the remaining noise is concentrated in one shape: cross-file flow, where a controller preloads a relation and hands it to a service object in another file (§10). The detectors that don't depend on that — `CountInIteration`, `PluckToArray`, `CallbackQuery`, `ValidationNPlusOne` — are close to 100% precise on this dataset.
+
+### What the real findings mean
+
+Not all of them are production emergencies. Some are weekly admin exports; some are jobs where each query is tiny. But every one is a place where a query-per-iteration pattern was left in the code, almost always without anyone knowing. The valuable ones are in hot paths — a `SerializerNesting` hit in an API serializer rendered millions of times a day is a different animal from a `db:seed` script. EagerEye flags both; deciding which to fix is your job.
 
 ---
 
@@ -240,47 +261,60 @@ gem "eager_eye", group: :development
 
 ```bash
 bundle install
+eager_eye               # scans app/ by default
 ```
 
-That's it. No Rails initializer, no config file. From your project root:
+No initializer, no config file. A typical Rails app scans in 2–5 seconds. Output looks like this:
+
+```text
+app/controllers/posts_controller.rb
+  Line 15: [LoopAssociation] Potential N+1 query: `post.author` called inside iteration
+           Suggestion: Use `includes(:author)` on the collection before iterating
+
+  Line 23: [MissingCounterCache] `.count` called on `comments` may cause N+1 queries
+           Suggestion: Add `counter_cache: true` to the belongs_to association
+
+Total: 2 issues (2 warnings, 0 errors)
+```
+
+Useful flags:
 
 ```bash
-eager_eye          # scans app/ by default
-eager_eye app/controllers app/serializers   # specific paths
-eager_eye --format json                     # for CI tools to parse
-eager_eye --only loop_association,serializer_nesting   # specific detectors
+eager_eye app/controllers app/serializers          # specific paths
+eager_eye --format json                            # machine-readable, for CI
+eager_eye --only loop_association,serializer_nesting
+eager_eye --exclude "app/legacy/**"
+eager_eye --min-severity error                     # ignore warnings and info
+eager_eye --no-fail                                # always exit 0
 ```
 
-A fresh scan of a typical Rails app finishes in 2-5 seconds.
+One tip that matters more than any flag: **scan a path that contains `models/`** — `app/`, not `app/controllers`. Model metadata (associations, `delegate`, `scope`, uniqueness validations) is collected from `<first path>/models/**`, and three detectors plus preload-aware association tracking depend on it.
 
-If you want to suppress detectors or set per-detector severity, generate a config file:
+### Configuration file (rake tasks)
 
-```bash
-rails g eager_eye:install
-```
-
-That creates `.eager_eye.yml`:
+`rails g eager_eye:install` creates `.eager_eye.yml`, which the `rake eager_eye:analyze` and `rake eager_eye:json` tasks load from `Rails.root`:
 
 ```yaml
 excluded_paths:
   - app/legacy/**
   - lib/tasks/**
 
-severity_levels:
-  loop_association: error
-  missing_counter_cache: info
+enabled_detectors:       # default: all 11
+  - loop_association
+  - serializer_nesting
+  - custom_method_query
 
-min_severity: warning
+app_path: app
 fail_on_issues: true
 ```
 
-`fail_on_issues: true` makes the CLI exit with a non-zero status when issues are found — the foundation for CI integration.
+The `eager_eye` CLI intentionally does *not* read this file — it takes the equivalent flags instead, so a CI step is self-describing. Programmatic configuration via `EagerEye.configure { |c| ... }` is also available for projects that wrap the analyzer in their own runner.
 
 ---
 
-## 6. CI Integration: Five Lines of YAML
+## 6. CI Integration and Baseline Mode
 
-The whole point of static analysis is that it runs without infrastructure. Here's a complete GitHub Actions workflow:
+The point of static analysis is that CI needs no infrastructure. A complete GitHub Actions workflow:
 
 ```yaml
 name: EagerEye
@@ -298,9 +332,26 @@ jobs:
       - run: eager_eye app/
 ```
 
-No DB setup, no `bundle install` of your full Gemfile, no fixtures. The whole job runs in under a minute. If new code introduces a flagged pattern, the build fails and the PR is blocked.
+No database service, no `bundle install` of your full Gemfile, no fixtures. The job finishes in well under a minute and fails the PR if any issue is found.
 
-For teams that want non-blocking warnings instead, swap the last line for:
+### Baseline mode: adopting EagerEye on a brownfield app
+
+The workflow above is unusable on an existing codebase — see the 827 findings in §4. Nobody is going to fix 827 issues before turning on a linter. So EagerEye 1.3.1 added the feature that was on the roadmap when this post first went out:
+
+```bash
+# once, locally: snapshot today's issues
+eager_eye app/ --format json > .eager_eye_baseline.json
+git add .eager_eye_baseline.json
+
+# in CI: fail only on issues that are NOT in the baseline
+eager_eye app/ --baseline .eager_eye_baseline.json
+```
+
+Existing issues are accepted as debt; the build fails only on **regressions** — a new N+1 introduced by the PR. As you pay down the debt, regenerate the baseline. The baseline is a plain `--format json` report, so there's nothing new to learn; the match key is `(detector, file, line, message, severity, suggestion)`, which means a fixed issue disappears and a moved one shows up as new until you refresh.
+
+### Warnings without blocking
+
+During a gradual rollout you may want visibility without enforcement. Surface the count as a GitHub annotation instead of a failure:
 
 ```yaml
 - run: eager_eye app/ --format json > report.json
@@ -309,28 +360,75 @@ For teams that want non-blocking warnings instead, swap the last line for:
     [ "$issues" -gt 0 ] && echo "::warning::Found $issues potential N+1 issues" || true
 ```
 
-This uses GitHub Actions' `::warning::` annotation syntax, which surfaces the issue count directly on the PR without failing the build. Useful during a gradual adoption phase where you want visibility but not enforcement.
+The [examples directory](https://github.com/hamzagedikkaya/eager_eye/blob/main/examples/github_action.yml) has a fuller version that turns each issue into a per-line `::warning file=...,line=...::` annotation on the PR diff.
 
 ---
 
-## 7. VS Code Extension: Same Engine, in Your Editor
+## 7. RSpec Matcher and Auto-fix
 
-For the development loop, a CLI run after every change is friction. EagerEye also ships as a [VS Code extension](https://marketplace.visualstudio.com/items?itemName=hamzagedikkaya.eager-eye) that runs on save and surfaces issues inline:
+### `pass_eager_eye`
 
-- Squiggly underline on the offending line
-- Hover for the explanation and suggestion
-- Quick Fix actions for common patterns (`.pluck(:id)` → `.select(:id)`, etc.)
-- Status bar showing total issue count for the current file
+If you'd rather enforce cleanliness from the test suite than from a separate CI step:
 
-The extension is a thin wrapper around the gem — it shells out to the `eager_eye` binary on save and parses the JSON output. Same analysis engine, same detection, just a smoother feedback loop.
+```ruby
+# spec/rails_helper.rb
+require "eager_eye/rspec"
 
-Recommended workflow: extension during development for fast iteration, CLI in CI to gate PRs.
+# spec/eager_eye_spec.rb
+RSpec.describe "EagerEye" do
+  it "keeps controllers free of N+1 patterns" do
+    expect("app/controllers").to pass_eager_eye
+  end
+
+  it "keeps serializers clean" do
+    expect("app/serializers").to pass_eager_eye(only: [:serializer_nesting])
+  end
+
+  it "tolerates legacy code, for now" do
+    expect("app/services/legacy").to pass_eager_eye(max_issues: 10)
+  end
+end
+```
+
+`only:`, `exclude:` and `max_issues:` cover the usual gradual-adoption needs. It runs in the same process as your specs and still never touches the database.
+
+### Auto-fix (experimental)
+
+```bash
+eager_eye --suggest-fixes    # print diffs, change nothing
+eager_eye --fix              # apply interactively
+eager_eye --fix --force      # apply everything
+```
+
+| Finding | Rewrite |
+|---|---|
+| `.pluck(:id)` inside `.where(id: ...)` | `.select(:id)` |
+| `.count` inside an iteration | `.size` |
+| Association access in a loop with no preload | inserts `.includes(:assoc)` before the iteration |
+
+The first two are mechanical and safe. The third is a *suggestion* — it can't know whether the collection is already preloaded three files away. Review the diff and run your suite.
 
 ---
 
-## 8. Suppressing False Positives
+## 8. VS Code Extension: Same Engine, in Your Editor
 
-When EagerEye gets it wrong (rare, but it happens), you suppress like RuboCop:
+Running a CLI after every change is friction. The [EagerEye VS Code extension](https://marketplace.visualstudio.com/items?itemName=hamzagedikkaya.eager-eye) runs the gem on save and on file open and turns the JSON output into editor diagnostics:
+
+- Squiggles at the offending line, tagged with the detector name, in the Problems panel
+- Hover for the message and the suggested fix
+- **Quick Fixes**: the `.pluck` → `.select` rewrite, plus one-click "disable for this line / this file" that inserts the gem's suppression comment for you
+- Status bar: `EagerEye: OK` or `EagerEye: 3 issues`; click to re-run
+- `EagerEye: Analyze Workspace` for a one-off pass over every Ruby file
+
+It's a thin shell around the gem — `eager_eye <file> --format json --no-fail` — so new detectors appear in the editor without an extension update. Set `eagerEye.gemPath` to `bundle exec eager_eye` if the gem lives in your bundle rather than on the global path.
+
+One limitation worth knowing: because the editor hands the gem a **single file**, the model-metadata pass doesn't run, so `DelegationNPlusOne`, `ScopeChainNPlusOne` and `ValidationNPlusOne` don't fire in the editor and association detection falls back to name heuristics. `db/schema.rb` *is* found, since the gem walks up from the file. The CLI on `app/` in CI gives you the full picture; the extension gives you the fast loop.
+
+---
+
+## 9. Suppressing False Positives
+
+RuboCop-style comments, accepted in either `CamelCase` or `snake_case`:
 
 ```ruby
 user.posts.count  # eager_eye:disable CountInIteration
@@ -342,67 +440,64 @@ user.posts.count  # eager_eye:disable CountInIteration
 @users.each { |u| u.posts.each { |p| p.author } }
 # eager_eye:enable LoopAssociation, SerializerNesting
 
-# Whole file (must be in first 5 lines)
-# eager_eye:disable-file CustomMethodQuery
+# eager_eye:disable-file custom_method_query     # must be in the first 5 lines
 
-# With explanation
-user.posts.count  # eager_eye:disable CountInIteration -- using counter_cache
+user.posts.count  # eager_eye:disable CountInIteration -- counter_cache handles this
+
+# eager_eye:disable all
 ```
 
-The `-- reason` syntax is borrowed from RuboCop and is purely documentation — the linter doesn't enforce it but reviewers will appreciate it.
+The `-- reason` suffix is documentation only, but reviewers will thank you. Suppressions are honoured identically by the CLI, the RSpec matcher and the editor, so a comment you add via Quick Fix carries over to CI.
 
 ---
 
-## 9. Known Limitations
+## 10. Known Limitations
 
-Static analysis isn't magic. Three things EagerEye can't do today:
+Static analysis isn't magic. What EagerEye can't do today:
 
-**Cross-file flow tracking.** EagerEye propagates preload context across method calls within the same class. If a controller calls a service object in a different file (`OrderProcessor.new(orders).call`), the analyzer can't see that the orders were preloaded. Same applies to renderable view partials.
+**Cross-file flow.** Preload context propagates across methods in the same class, but not across files. When a controller does `OrderProcessor.new(orders).call` and the iteration lives in `OrderProcessor`, the analyzer can't see that `orders` was preloaded. Partials have the same problem. This is where most of the remaining false positives come from.
 
-**Runtime metadata.** EagerEye doesn't read your DB schema, doesn't know if a column has an index, doesn't know how many records actually live in production. A `Post.where(active: true).each` looks identical whether `active` is on 10 records or 10 million. Bullet plus production monitoring (Skylight, Scout, NewRelic) cover this.
+**Runtime facts.** It reads `db/schema.rb` for column names, but it doesn't know how many rows a table has, whether an index exists, or how hot an endpoint is. `Post.where(active: true).each` looks identical at 10 rows and 10 million. Bullet, `strict_loading`, and production monitoring cover that side.
 
-**Heuristic association detection.** When a method is called on an iteration variable but the variable's model class can't be inferred, EagerEye falls back to a small hardcoded list of common association names (`author`, `user`, `posts`, etc.). This can miss exotic naming, and very rarely it can over-flag (a column happens to share a name with a common association). The hardcoded list errs on the side of suppression.
+**Heuristic association detection.** When neither the parsed models nor the schema can identify a receiver, EagerEye falls back to a short list of common association names (`author`, `user`, `posts`, …). Exotic naming can slip through; the list errs toward silence.
 
-The honest summary: use EagerEye alongside Bullet, not instead of it. Static catches code paths Bullet can't reach; runtime catches what static can't see. They're complementary.
+**Unparseable files are skipped, not analyzed.** A file the parser can't lex — a binary string literal with invalid UTF-8 escapes, an unknown `# encoding:` comment — is dropped with a single `EagerEye: Skipped unparseable file ...` line rather than crashing the run (1.3.2). The skipped list is available via `Analyzer#skipped_files`.
+
+The honest summary hasn't changed: use EagerEye **alongside** Bullet, not instead of it. Static catches the code paths runtime never reaches; runtime catches what static can't see.
 
 ---
 
-## 10. Roadmap and How to Contribute
+## 11. Roadmap and How to Contribute
 
-The thing I most want to add next is **inter-file call graph tracking** — propagating preload context not just across same-class methods but across `include`d modules and called service objects. The current implementation handles intra-class flow well; cross-file is the main remaining false-positive source.
+Baseline mode was the top item here last time; it shipped in 1.3.1. What's next:
 
-Beyond that:
+- **Inter-file call graph** — propagate preload context into `include`d modules and called service objects. This is the main remaining false-positive source, and the hardest item on the list.
+- **Unified linter output** — [Reek](https://github.com/troessner/reek) / [RuboCop](https://rubocop.org/) style formatters so EagerEye findings sit in the same report as everything else.
+- **Trend tracking** — a small dashboard over successive JSON reports, so a team can watch its N+1 count go down.
 
-- A `--baseline` mode that snapshots existing issues and only fails CI on *new* ones (so you can adopt EagerEye on a brownfield project without fixing 800 existing warnings on day one)
-- Integration with [Reek](https://github.com/troessner/reek) and [RuboCop](https://rubocop.org/) for unified linter output
-- A web dashboard for tracking issue trends over time
+The gem is MIT-licensed, sits at roughly 95% test coverage, and welcomes PRs:
 
-If any of these sound useful, the gem is MIT-licensed and open to PRs:
-
-- Repo: [github.com/hamzagedikkaya/eager_eye](https://github.com/hamzagedikkaya/eager_eye)
+- Gem: [github.com/hamzagedikkaya/eager_eye](https://github.com/hamzagedikkaya/eager_eye)
 - VS Code extension: [github.com/hamzagedikkaya/eager_eye_vscode](https://github.com/hamzagedikkaya/eager_eye_vscode)
-- Issues and feature requests welcome.
 
 ---
 
 ## Conclusion
 
-In the [previous post]({% post_url 2025-12-06-beyond_n+1 %}) I argued that Bullet only catches the tip of the N+1 iceberg. EagerEye is my attempt at catching most of the rest, automatically, in CI, on every PR — without DB infrastructure, without test fixtures, and without learning a new query DSL.
+The [previous post]({% post_url 2025-12-06-beyond_n+1 %}) argued that Bullet only catches the tip of the N+1 iceberg. EagerEye is my attempt at the rest: automatic, on every PR, with no database, no fixtures, and no new DSL.
 
-It won't catch everything. Static analysis fundamentally can't. But it shifts the detection point from "after deployment, when production starts paging" to "before merge, when the developer can still fix it cheaply." That shift is most of what makes a tool useful.
+It won't catch everything — static analysis fundamentally can't — and the first published false-positive number in this post was wrong by an order of magnitude, which is its own lesson about sampling. But the tool shifts detection from "after deploy, when production pages you" to "before merge, when the fix is one `.includes` away", and baseline mode means you can turn it on today without fixing a thousand legacy warnings first.
 
-If you try it on a real codebase and find it useful — or find a false positive — open an issue. The whole reason I built this is that the existing tooling left a gap, and the only way to close that gap is to keep iterating on real codebases.
+If you run it on a real codebase and find something — a real N+1 or a false positive — open an issue. The tool got better every time someone did.
 
 ---
 
 ## Resources
 
-- [EagerEye on RubyGems](https://rubygems.org/gems/eager_eye)
-- [EagerEye on GitHub](https://github.com/hamzagedikkaya/eager_eye)
-- [VS Code Extension](https://marketplace.visualstudio.com/items?itemName=hamzagedikkaya.eager-eye)
-- [Beyond N+1: Hidden Performance Traps and Fixes]({% post_url 2025-12-06-beyond_n+1 %}) (the post that motivated this tool)
-- [Meridian]({% post_url 2026-05-23-meridian %}) — Rails 8 app I'm building that ships `eager_eye` in its dev Gemfile
-- [Bullet Gem](https://github.com/flyerhzm/bullet)
-- [Prosopite](https://github.com/charkost/prosopite)
-- [Parser Gem](https://github.com/whitequark/parser) (the AST library EagerEye is built on)
-- [RuboCop](https://github.com/rubocop/rubocop) (architectural inspiration for the suppression syntax)
+- [EagerEye on RubyGems](https://rubygems.org/gems/eager_eye) · [GitHub](https://github.com/hamzagedikkaya/eager_eye) · [CHANGELOG](https://github.com/hamzagedikkaya/eager_eye/blob/main/CHANGELOG.md)
+- [VS Code extension](https://marketplace.visualstudio.com/items?itemName=hamzagedikkaya.eager-eye)
+- [Beyond N+1: Hidden Performance Traps and Fixes]({% post_url 2025-12-06-beyond_n+1 %}) — the post that motivated this tool
+- [Meridian]({% post_url 2026-05-23-meridian %}) — the Rails 8 app that runs EagerEye in its dev Gemfile
+- [Bullet](https://github.com/flyerhzm/bullet) · [Prosopite](https://github.com/charkost/prosopite)
+- [whitequark/parser](https://github.com/whitequark/parser) — the AST library EagerEye is built on
+- [RuboCop](https://github.com/rubocop/rubocop) — inspiration for the suppression syntax
