@@ -13,7 +13,7 @@ This repository is the source for **[hamzagedikkaya.github.io](https://hamzagedi
 
 #### Stack
 
-Ruby on Rails · PostgreSQL · Hotwire · Tailwind · RSpec · Flutter — with a particular interest in static analysis, AST tooling, and Rails internals.
+Ruby on Rails · PostgreSQL · Hotwire · Tailwind · RSpec — with a particular interest in static analysis, AST tooling, and Rails internals.
 
 #### Reach me
 
